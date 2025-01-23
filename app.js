@@ -21,10 +21,6 @@ const connectionConfig = {
 
 const pool = mysql.createPool(connectionConfig);
 
-
-
-
-
 pool.getConnection((err, connection) => {
   if (err) {
     console.error("Error connecting to the database:", err);
@@ -97,6 +93,5 @@ app.post('/api/upload-image/:formId', upload.single('image'), (req, res) => {
     });
   });
 });
-
 
 module.exports = app;
