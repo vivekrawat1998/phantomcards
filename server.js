@@ -1,15 +1,11 @@
 const app = require('./app');
+const port = process.env.PORT || 3000;
 
-// Remove the http server creation
-// const server = http.createServer(app);
-
-// Export the app directly for Vercel
-module.exports = app;
-
-// Only listen if running directly (not on Vercel)
-if (process.env.NODE_ENV !== 'production') {
-    const port = process.env.PORT || 3000;
-    app.listen(port, () => {
-        console.log(`Server is running on port ${port}`);
-    });
+// Only run the server when not on Vercel
+if (!process.env.VERCEL) {
+  app.listen(port, () => {
+    console.log(`Server is running on port ${port}`);
+  });
 }
+
+module.exports = app;
