@@ -2,7 +2,6 @@ require("dotenv").config();
 const express = require("express");
 const mysql = require("mysql2");
 const multer = require("multer");
-const path = require("path");
 const cors = require("cors");
 
 const app = express();
@@ -13,103 +12,118 @@ const Buffer = require("buffer").Buffer;
 const decodeBase64 = (encoded) =>
   Buffer.from(encoded, "base64").toString("utf-8");
 
-const connectionConfig = {
+// Create connection pool with proper error handling
+const pool = mysql.createPool({
   host: decodeBase64(process.env.DB_HOST),
   user: decodeBase64(process.env.DB_USER),
   password: decodeBase64(process.env.DB_PASSWORD),
   database: decodeBase64(process.env.DB_NAME),
-  ssl: process.env.VERCEL ? {
+  ssl: {
     rejectUnauthorized: true
-  } : false,
+  },
   waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-};
+  connectionLimit: 1, // Reduce for serverless
+  maxIdle: 1, // Reduce idle connections
+  enableKeepAlive: false, // Disable connection keepalive
+  idleTimeout: 60000 // Reduce idle timeout
+});
 
-const pool = mysql.createPool(connectionConfig);
+// Convert pool to promise-based operations
+const promisePool = pool.promise();
 
-pool.getConnection((err, connection) => {
-  if (err) {
-    console.error("Error connecting to the database:", err);
-    process.exit(1);
-  } else {
-    console.log("Connected to the database");
-    connection.release();
+// Health check endpoint
+app.get("/api/healthcheck", async (req, res) => {
+  try {
+    await promisePool.query("SELECT 1");
+    res.status(200).json({ status: "healthy" });
+  } catch (error) {
+    console.error("Health check failed:", error);
+    res.status(500).json({ status: "unhealthy", error: error.message });
   }
 });
 
+// Setup multer
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
 
-app.post("/api/submit-form", (req, res) => {
-  const { name, phonenumber, address, city, state, pincode } = req.body;
+// Form submission endpoint with async/await
+app.post("/api/submit-form", async (req, res) => {
+  try {
+    const { name, phonenumber, address, city, state, pincode } = req.body;
 
-  if (!name || !phonenumber || !address || !city || !state || !pincode) {
-    return res.status(400).json({ error: "All fields are required" });
-  }
-
-  const sql =
-    "INSERT INTO formdata_with_image (name, phonenumber, address, city, pincode, state, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())";
-
-  pool.query(
-    sql,
-    [name, phonenumber, address, city, pincode, state],
-    (err, results) => {
-      if (err) {
-        console.error("Error executing query:", err);
-        return res.status(500).json({ error: "Database operation failed" });
-      }
-
-      console.log("Form data inserted successfully:", results);
-      res
-        .status(201)
-        .json({ message: "Form submitted successfully", id: results.insertId });
+    if (!name || !phonenumber || !address || !city || !state || !pincode) {
+      return res.status(400).json({ error: "All fields are required" });
     }
-  );
+
+    const [results] = await promisePool.execute(
+      "INSERT INTO formdata_with_image (name, phonenumber, address, city, pincode, state, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())",
+      [name, phonenumber, address, city, pincode, state]
+    );
+
+    res.status(201).json({ 
+      message: "Form submitted successfully", 
+      id: results.insertId 
+    });
+  } catch (error) {
+    console.error("Error in submit-form:", error);
+    res.status(500).json({ 
+      error: "Database operation failed", 
+      details: error.message 
+    });
+  }
 });
 
-app.post("/api/upload-image/:formId", upload.single("image"), (req, res) => {
-  const formId = req.params.formId;
-  const image = req.file;
-  if (!image) {
-    return res.status(400).json({ error: "Image file is required" });
-  }
+// Image upload endpoint with async/await
+app.post("/api/upload-image/:formId", upload.single("image"), async (req, res) => {
+  try {
+    const { formId } = req.params;
+    const image = req.file;
 
-  const imageBuffer = image.buffer;
-
-  const checkFormExistenceSQL =
-    "SELECT id FROM formdata_with_image WHERE id = ?";
-  pool.query(checkFormExistenceSQL, [formId], (err, results) => {
-    if (err) {
-      console.error("Error checking form existence:", err);
-      return res.status(500).json({ error: "Database operation failed" });
+    if (!image) {
+      return res.status(400).json({ error: "Image file is required" });
     }
 
-    if (results.length === 0) {
-      console.log("No form found with the given formId");
+    // Check if form exists
+    const [form] = await promisePool.execute(
+      "SELECT id FROM formdata_with_image WHERE id = ?",
+      [formId]
+    );
+
+    if (form.length === 0) {
       return res.status(404).json({ error: "Form ID not found" });
     }
 
-    const updateImageSQL =
-      "UPDATE formdata_with_image SET image_data = ? WHERE id = ?";
-    pool.query(updateImageSQL, [imageBuffer, formId], (err, results) => {
-      if (err) {
-        console.error("Error executing query:", err);
-        return res.status(500).json({ error: "Database operation failed" });
-      }
+    // Update image
+    const [result] = await promisePool.execute(
+      "UPDATE formdata_with_image SET image_data = ? WHERE id = ?",
+      [image.buffer, formId]
+    );
 
-      if (results.changedRows === 0) {
-        console.log("No rows were updated");
-        return res.status(404).json({
-          error: "Image upload failed, form ID not found or image unchanged",
-        });
-      }
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        error: "Image upload failed, form ID not found or image unchanged"
+      });
+    }
 
-      console.log("Image uploaded successfully:", results);
-      res
-        .status(200)
-        .json({ message: "Image uploaded successfully", id: formId });
+    res.status(200).json({ 
+      message: "Image uploaded successfully", 
+      id: formId 
     });
+  } catch (error) {
+    console.error("Error in upload-image:", error);
+    res.status(500).json({ 
+      error: "Database operation failed", 
+      details: error.message 
+    });
+  }
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ 
+    error: "Something broke!", 
+    details: err.message 
   });
 });
 
